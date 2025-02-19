@@ -25,6 +25,8 @@ class GeometryFile:
     fbx: Optional[str] = None  # 相对路径
     abc: Optional[str] = None
     tris: Optional[int] = None  # 面数
+    lod_level: str = ""        # 当前几何体的LOD级别
+    var_id: str = ""          # 所属的变体ID
     
     def to_dict(self):
         return asdict(self)
@@ -34,14 +36,21 @@ class TextureFile:
     path: str  # 相对路径
     format: str  # 文件格式(exr/jpg/png)
     color_space: str  # 颜色空间(Linear/sRGB)
+    resolution: str = ""  # 纹理分辨率（如"4k"）
+    type: str = ""  # 纹理类型（如"albedo"、"normal"等）
+    var_id: Optional[str] = None  # 如果是变体专属纹理，存储变体ID
     lod: Optional[str] = None  # LOD级别，如果有
 
     def to_dict(self):
         result = {
             "path": self.path,
             "format": self.format,
-            "color_space": self.color_space
+            "color_space": self.color_space,
+            "resolution": self.resolution,
+            "type": self.type
         }
+        if self.var_id is not None:
+            result["var_id"] = self.var_id
         if self.lod is not None:
             result["lod"] = self.lod
         return result
@@ -97,7 +106,15 @@ class LocalMegascanAsset:
         self.is_3d_plant = False  # 新增：标识是否为3D植物资产
         
         self._load_asset()
-    
+
+
+    #        #######     #     ######              #      #####    #####   #######  ####### 
+    #        #     #    # #    #     #            # #    #     #  #     #  #           #    
+    #        #     #   #   #   #     #           #   #   #        #        #           #    
+    #        #     #  #     #  #     #          #     #   #####    #####   #####       #    
+    #        #     #  #######  #     #          #######        #        #  #           #    
+    #        #     #  #     #  #     #          #     #  #     #  #     #  #           #    
+    #######  #######  #     #  ######           #     #   #####    #####   #######     #    
     def _load_asset(self):
         """加载并解析资产"""
         # 1. 扫描本地文件
@@ -211,34 +228,20 @@ class LocalMegascanAsset:
             print(f"处理有变体目录的情况...")
             var_dirs.sort()
             for var_dir in var_dirs:
-                print(f"\n处理变体目录: {var_dir}")
                 self._parse_variation(var_dir)
         else:
             # 无变体目录的情况，创建默认变体
             print(f"没有找到变体目录，使用默认变体Var1")
-            self._parse_variation("Var1", is_default=True)
-        
-        print(f"\n几何体解析结果:")
-        print(f"找到的变体数量: {len(self.geometries)}")
-        for var_id, var_geo in self.geometries.items():
-            print(f"\n变体 {var_id}:")
-            print(f"LOD数量: {len(var_geo.lods)}")
-            for lod_name, lod_data in var_geo.lods.items():
-                print(f"  {lod_name}:")
-                if lod_data.fbx:
-                    print(f"    FBX: {lod_data.fbx}")
-                if lod_data.abc:
-                    print(f"    ABC: {lod_data.abc}")
-                if lod_data.tris:
-                    print(f"    面数: {lod_data.tris}")
+            self._parse_variation("Var1", default_variation=True)
+
     
-    def _parse_variation(self, var_id: str, is_default: bool = False):
+    def _parse_variation(self, var_id: str, default_variation: bool = False):
         """解析单个变体的几何体"""
-        print(f"\n开始解析变体: {var_id} (is_default={is_default})")
+        print(f"\n开始解析变体: {var_id} (is_default={default_variation})")
         var_geo = GeometryVariation(var_id=var_id)
         
         # 确定基础路径和资产ID
-        base_path = f"{var_id}/" if not is_default else ""
+        base_path = f"{var_id}/" if not default_variation else ""
         asset_id = self.json_data['id']
         print(f"基础路径: {base_path}")
         print(f"资产ID: {asset_id}")
@@ -249,23 +252,20 @@ class LocalMegascanAsset:
             for model in self.json_data["models"]:
                 print(f"\n处理model: {model}")
                 
-                # 检查变体匹配
-                if "variations" in model:
-                    if int(var_id[3:]) not in model["variations"]:
-                        print(f"变体不匹配，跳过")
-                        continue
-                    print(f"变体匹配成功")
-                
                 # 获取文件路径
                 if "uri" not in model or not model["uri"]:
                     print(f"没有uri字段或uri为空，跳过")
                     continue
                 
                 # 规范化路径以进行比较
-                model_uri = model["uri"]#.replace("/", os.sep)
+                model_uri = model["uri"]
                 print(f"规范化后的文件路径: {model_uri}")
                 
-                # 检查文件是否存在
+                # 检查文件是否存在且属于当前变体
+                if not model_uri.startswith(base_path) and not default_variation:
+                    print(f"文件不属于当前变体目录，跳过: {model_uri}")
+                    continue
+                
                 if model_uri not in self.local_files:
                     print(f"文件不存在于本地文件列表中: {model_uri}")
                     continue
@@ -274,6 +274,8 @@ class LocalMegascanAsset:
                 
                 # 创建几何体文件
                 lod_geo = GeometryFile()
+                lod_geo.var_id = var_id  # 设置变体ID
+                
                 if model["mimeType"] == "application/x-fbx":
                     lod_geo.fbx = model_uri
                     print(f"设置为FBX文件")
@@ -283,11 +285,13 @@ class LocalMegascanAsset:
                 lod_geo.tris = model.get("tris")
                 
                 # 确定LOD级别
-                if model["type"] == "original":
+                if model["type"] == "original" or model["type"] == "high" or model["type"] == "High":
+                    lod_geo.lod_level = "High"  # 设置LOD级别
                     var_geo.lods["High"] = lod_geo
                     print(f"添加为High模型")
                 elif model["type"] == "lod":
                     lod_level = str(model["lod"])
+                    lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
                     var_geo.lods[f"LOD{lod_level}"] = lod_geo
                     print(f"添加为LOD{lod_level}模型")
                 
@@ -299,9 +303,17 @@ class LocalMegascanAsset:
                 if mesh["type"] == "original":
                     print("处理original类型mesh")
                     for uri in mesh["uris"]:
+                        # 检查文件是否属于当前变体
+                        if not uri["uri"].startswith(base_path) and not default_variation:
+                            print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
+                            continue
+                            
                         if uri["uri"] in self.local_files:
                             print(f"找到文件: {uri['uri']}")
                             lod_geo = GeometryFile()
+                            lod_geo.var_id = var_id  # 设置变体ID
+                            lod_geo.lod_level = "High"  # 设置LOD级别
+                            
                             if uri["mimeType"] == "application/x-fbx":
                                 lod_geo.fbx = uri["uri"]
                                 print(f"设置为FBX文件")
@@ -315,9 +327,16 @@ class LocalMegascanAsset:
                 elif mesh["type"] == "lod":
                     print("处理lod类型mesh")
                     for uri in mesh["uris"]:
+                        # 检查文件是否属于当前变体
+                        if not uri["uri"].startswith(base_path) and not default_variation:
+                            print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
+                            continue
+                            
                         if uri["uri"] in self.local_files:
                             print(f"找到文件: {uri['uri']}")
                             lod_geo = GeometryFile()
+                            lod_geo.var_id = var_id  # 设置变体ID
+                            
                             if uri["mimeType"] == "application/x-fbx":
                                 lod_geo.fbx = uri["uri"]
                                 print(f"设置为FBX文件")
@@ -330,6 +349,7 @@ class LocalMegascanAsset:
                             lod_match = uri["uri"].split("_LOD")
                             if len(lod_match) > 1:
                                 lod_level = lod_match[-1].split(".")[0]
+                                lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
                                 var_geo.lods[f"LOD{lod_level}"] = lod_geo
                                 print(f"添加为LOD{lod_level}模型")
         
@@ -390,27 +410,31 @@ class LocalMegascanAsset:
                         filename = fmt["uri"]
                         full_path = os.path.join(texture_root, filename)
                         
-                        if full_path not in self.local_files:
-                            # 检查Thumbs目录
-                            thumb_path = f"Thumbs/{res_key}/{filename}"
-                            if thumb_path not in self.local_files:
-                                continue
-                            full_path = thumb_path
-                        
-                        texture_file = TextureFile(
-                            path=full_path,
-                            format=filename.split(".")[-1].lower(),
-                            color_space=color_space
-                        )
-                        
-                        # 处理LOD贴图
-                        if "lodType" in fmt:
-                            lod_match = filename.split("_LOD")
-                            if len(lod_match) > 1:
-                                texture_file.lod = lod_match[-1].split(".")[0]
-                        
-                        texture_res.add_file(texture_file)
-                        has_files = True
+                        # 只处理存在于本地且不在Thumbs目录的文件
+                        if full_path in self.local_files and not full_path.startswith("Thumbs/"):
+                            # 检查是否为变体专属纹理
+                            var_id = None
+                            var_match = re.search(r'Var(\d+)', filename)
+                            if var_match:
+                                var_id = f"Var{var_match.group(1)}"
+                            
+                            texture_file = TextureFile(
+                                path=full_path,
+                                format=filename.split(".")[-1].lower(),
+                                color_space=color_space,
+                                resolution=res_key,
+                                type=texture_type,
+                                var_id=var_id
+                            )
+                            
+                            # 处理LOD贴图
+                            if "lodType" in fmt:
+                                lod_match = filename.split("_LOD")
+                                if len(lod_match) > 1:
+                                    texture_file.lod = lod_match[-1].split(".")[0]
+                            
+                            texture_res.add_file(texture_file)
+                            has_files = True
                     
                     # 只有当有实际文件时才添加该分辨率
                     if has_files:
@@ -421,8 +445,8 @@ class LocalMegascanAsset:
     def _parse_maps_textures(self, maps, texture_root):
         """解析maps格式的纹理"""
         for map_info in maps:
-            # 跳过billboard纹理
-            if "Textures/Billboard" in map_info["uri"]:
+            # 跳过billboard纹理和Thumbs目录的纹理
+            if "Textures/Billboard" in map_info["uri"] or "Thumbs/" in map_info["uri"]:
                 continue
             
             texture_type = map_info["name"].lower()
@@ -447,28 +471,31 @@ class LocalMegascanAsset:
             full_path = map_info["uri"]
             print(f"检查文件路径: {full_path}")
             
-            # 检查文件是否存在
-            if full_path not in self.local_files:
-                # 检查Thumbs目录
-                thumb_path = f"Thumbs/{res_key}/{os.path.basename(map_info['uri'])}"
-                if thumb_path.lower() not in [f.lower() for f in self.local_files]:
-                    continue
-                full_path = thumb_path
-            
-            # 创建纹理文件对象
-            texture_file = TextureFile(
-                path=full_path,
-                format=map_info["mimeType"].split("/")[-1].split("-")[-1].lower(),
-                color_space=color_space
-            )
-            
-            # 处理LOD贴图
-            if "lod" in map_info and map_info["lod"] != -1:
-                texture_file.lod = str(map_info["lod"])
-            
-            # 添加到对应的TextureResolution对象
-            self.textures[texture_type][res_key].add_file(texture_file)
-            print(f"添加纹理: {texture_type} ({res_key}): {full_path}")
+            # 只处理存在于本地且不在Thumbs目录的文件
+            if full_path in self.local_files and not full_path.startswith("Thumbs/"):
+                # 创建纹理文件对象
+                # 检查是否为变体专属纹理
+                var_id = None
+                var_match = re.search(r'Var(\d+)', full_path)
+                if var_match:
+                    var_id = f"Var{var_match.group(1)}"
+                
+                texture_file = TextureFile(
+                    path=full_path,
+                    format=map_info["mimeType"].split("/")[-1].split("-")[-1].lower(),
+                    color_space=color_space,
+                    resolution=res_key,
+                    type=texture_type,
+                    var_id=var_id
+                )
+                
+                # 处理LOD贴图
+                if "lod" in map_info and map_info["lod"] != -1:
+                    texture_file.lod = str(map_info["lod"])
+                
+                # 添加到对应的TextureResolution对象
+                self.textures[texture_type][res_key].add_file(texture_file)
+                print(f"添加纹理: {texture_type} ({res_key}): {full_path}")
     
     def _update_asset_info(self):
         """更新资产信息中的几何体和纹理概述"""
@@ -495,6 +522,14 @@ class LocalMegascanAsset:
             texture_res.update(tex_type.keys())
         self.asset_info.texture_resolutions = ",".join(sorted(texture_res))
     
+                                                                                                                                
+    ######  #    #  #####    ####   #####   #####      #        ####    ####     ##    #           #  #    #  ######   ####  
+    #        #  #   #    #  #    #  #    #    #        #       #    #  #    #   #  #   #           #  ##   #  #       #    # 
+    #####     ##    #    #  #    #  #    #    #        #       #    #  #       #    #  #           #  # #  #  #####   #    # 
+    #         ##    #####   #    #  #####     #        #       #    #  #       ######  #           #  #  # #  #       #    # 
+    #        #  #   #       #    #  #   #     #        #       #    #  #    #  #    #  #           #  #   ##  #       #    # 
+    ######  #    #  #        ####   #    #    #        ######   ####    ####   #    #  ######      #  #    #  #        ####  
+                                                                                                                            
     def export_local_info(self) -> Dict:
         """导出本地资产信息"""
         mapping_manager = TextureMappingManager(self)
@@ -604,65 +639,66 @@ class TextureMappingManager:
         self.mappings: List[TextureMapping] = []
         self._create_mappings()
     
-    def _get_texture_location(self) -> Tuple[str, Dict[str, str]]:
+    def _get_best_texture(self) -> Tuple[str, Dict[str, str]]:
         """
-        确定纹理位置并获取共享纹理
+        获取最佳纹理并确定它们的位置
         Returns:
             Tuple[str, Dict[str, str]]: (位置类型, 共享纹理映射)
             位置类型可以是: "root", "atlas", "default"
         """
-        # 检查根目录纹理
-        root_textures = {
-            texture_type: self._get_best_texture(texture_type, "root")
-            for texture_type in self.asset.textures
-        }
-        if any(root_textures.values()):
-            return "root", root_textures
-            
-        # 检查Atlas目录纹理
-        atlas_textures = {
-            texture_type: self._get_best_texture(texture_type, "atlas")
-            for texture_type in self.asset.textures
-        }
-        if any(atlas_textures.values()):
-            return "atlas", atlas_textures
-            
-        # 使用默认位置纹理
-        default_textures = {
-            texture_type: self._get_best_texture(texture_type, "default")
-            for texture_type in self.asset.textures
-        }
-        return "default", default_textures
-    
-    def _get_best_texture(self, texture_type: str, location: str) -> Optional[str]:
-        """
-        获取指定位置的最佳纹理
-        Args:
-            texture_type: 纹理类型
-            location: 位置类型("root", "atlas", "default")
-        """
-        if texture_type not in self.asset.textures:
-            return None
-            
-        # 获取最高分辨率
-        resolutions = sorted(self.asset.textures[texture_type].keys(), reverse=True)
-        if not resolutions:
-            return None
-            
-        highest_res = resolutions[0]
-        texture_files = self.asset.textures[texture_type][highest_res].files
+        print(f"\n开始获取最佳纹理...")
         
-        # 根据位置筛选文件
-        if location == "root":
-            valid_files = [f for f in texture_files 
-                          if not f.path.startswith(("Textures/Atlas/", "Thumbs/"))]
-        elif location == "atlas":
-            valid_files = [f for f in texture_files 
-                          if f.path.startswith("Textures/Atlas/")]
-        else:  # default
-            valid_files = texture_files
+        # 定义要检查的位置顺序
+        locations = ["root", "atlas", "default"]
+        
+        for location in locations:
+            print(f"\n检查{location}目录纹理...")
+            textures = {}
             
-        return self._get_best_format(valid_files).path if valid_files else None
+            for texture_type in self.asset.textures:
+                # 获取所有分辨率并按从高到低排序
+                resolutions = sorted(self.asset.textures[texture_type].keys(), reverse=True)
+                if not resolutions:
+                    print(f"纹理类型 {texture_type} 没有可用分辨率")
+                    continue
+                    
+                # 遍历所有分辨率，直到找到有效的纹理文件
+                for res in resolutions:
+                    print(f"尝试分辨率: {res}")
+                    texture_files = self.asset.textures[texture_type][res].files
+                    if not texture_files:
+                        print(f"分辨率 {res} 没有可用文件")
+                        continue
+                        
+                    # 根据位置筛选文件
+                    print(f"筛选前的纹理文件: {[f.path for f in texture_files]}")
+                    if location == "root":
+                        valid_files = [f for f in texture_files 
+                                    if not f.path.startswith(("Textures/Atlas/", "Thumbs/"))]
+                    elif location == "atlas":
+                        valid_files = [f for f in texture_files 
+                                    if f.path.startswith("Textures/Atlas/")]
+                    else:  # default
+                        valid_files = texture_files
+                    
+                    print(f"筛选后的纹理文件: {[f.path for f in valid_files]}")
+                    
+                    # 如果找到有效文件，返回最佳格式的文件
+                    if valid_files:
+                        best_file = self._get_best_format(valid_files)
+                        if best_file:
+                            print(f"找到最佳纹理: {best_file.path}")
+                            textures[texture_type] = best_file.path
+                            break  # 找到该类型的纹理后跳出分辨率循环
+            
+            # 如果在当前位置找到了任何纹理，就返回结果
+            if textures:
+                print(f"在{location}目录找到纹理，使用此位置")
+                return location, textures
+        
+        # 如果所有位置都没有找到纹理，返回默认位置和空字典
+        print(f"所有位置都没有找到纹理，使用默认位置")
+        return "default", {}
     
     def _has_variant_textures(self, shared_textures: Dict[str, str]) -> bool:
         """
@@ -679,7 +715,7 @@ class TextureMappingManager:
     def _create_mappings(self):
         """创建所有几何体的纹理映射"""
         # 1. 确定纹理位置并获取共享纹理
-        location, shared_textures = self._get_texture_location()
+        location, shared_textures = self._get_best_texture()
         
         # 2. 检查是否有变体
         has_variants = len(self.asset.geometries) > 1
@@ -702,52 +738,82 @@ class TextureMappingManager:
                     if not texture_path:
                         continue
                         
-                    # 检查是否有LOD专属纹理
-                    lod_texture = self._find_lod_texture(
-                        texture_type, lod_level, location
-                    )
+                    # 尝试获取纹理，按优先级：变体专属 -> LOD专属 -> 共享纹理
+                    final_texture = None
                     
-                    if lod_texture:
-                        mapping.textures[texture_type] = lod_texture
-                    else:
-                        mapping.textures[texture_type] = texture_path
+                    # 1. 如果有变体专属纹理，尝试获取
+                    if has_variants and has_variant_textures:
+                        final_texture = self._find_variant_texture(
+                            texture_type, var_id, location
+                        )
+                    
+                    # 2. 如果没有变体专属纹理，尝试获取LOD专属纹理
+                    if not final_texture:
+                        final_texture = self._find_lod_texture(
+                            texture_type, lod_level, location
+                        )
+                    
+                    # 3. 如果都没有，使用共享纹理
+                    if not final_texture:
+                        final_texture = texture_path
+                    
+                    # 设置最终选择的纹理
+                    if final_texture:
+                        mapping.textures[texture_type] = final_texture
                 
                 self.mappings.append(mapping)
     
-    def _find_lod_texture(self, 
-                         texture_type: str, 
-                         lod_level: str,
-                         location: str) -> Optional[str]:
+    def _find_lod_texture(self, texture_type: str, lod_level: str, location: str) -> Optional[str]:
         """
-        查找LOD专属纹理
+        查找LOD专属纹理，如果找不到对应级别的纹理，尝试使用最接近的较低LOD级别的纹理
         """
         if texture_type not in self.asset.textures:
             return None
-            
-        # 获取最高分辨率
+        
+        # 获取所有分辨率并按从高到低排序
         resolutions = sorted(self.asset.textures[texture_type].keys(), reverse=True)
         if not resolutions:
             return None
             
-        highest_res = resolutions[0]
-        texture_files = self.asset.textures[texture_type][highest_res].files
-        
-        # 根据位置筛选文件
-        if location == "root":
-            valid_files = [f for f in texture_files 
-                          if not f.path.startswith(("Textures/Atlas/", "Thumbs/"))]
-        elif location == "atlas":
-            valid_files = [f for f in texture_files 
-                          if f.path.startswith("Textures/Atlas/")]
-        else:
+        # 遍历所有分辨率，直到找到对应LOD级别的纹理
+        for res in resolutions:
+            texture_files = self.asset.textures[texture_type][res].files
             valid_files = texture_files
-        
-        # 查找匹配的LOD纹理
-        lod_num = lod_level.replace("LOD", "") if lod_level != "High" else None
-        if lod_num:
-            lod_files = [f for f in valid_files if f.lod == lod_num]
+            
+            # 如果是High级别，使用不带LOD的纹理
+            if lod_level == "High":
+                non_lod_files = [f for f in valid_files if f.lod is None]
+                if non_lod_files:
+                    return self._get_best_format(non_lod_files).path
+                continue
+            
+            # 获取当前LOD编号
+            current_lod = int(lod_level.replace("LOD", ""))
+            
+            # 1. 首先尝试查找完全匹配的LOD级别
+            lod_files = [f for f in valid_files if f.lod == str(current_lod)]
             if lod_files:
                 return self._get_best_format(lod_files).path
+            
+            # 2. 如果没有找到完全匹配的，查找最接近的较低LOD级别
+            available_lods = sorted([int(f.lod) for f in valid_files if f.lod is not None], reverse=True)
+            closest_lod = None
+            for lod in available_lods:
+                if lod < current_lod:
+                    closest_lod = str(lod)
+                    break
+                
+            if closest_lod is not None:
+                lod_files = [f for f in valid_files if f.lod == closest_lod]
+                if lod_files:
+                    print(f"使用LOD{closest_lod}纹理替代LOD{current_lod}")
+                    return self._get_best_format(lod_files).path
+            
+            # 3. 如果没有找到任何较低LOD级别的纹理，使用不带LOD的纹理
+            non_lod_files = [f for f in valid_files if f.lod is None]
+            if non_lod_files:
+                # print(f"使用无LOD纹理替代LOD{current_lod}")
+                return self._get_best_format(non_lod_files).path
         
         return None
     
@@ -782,48 +848,3 @@ def create_local_asset(asset_folder: str) -> LocalMegascanAsset:
         LocalMegascanAsset对象
     """
     return LocalMegascanAsset(asset_folder)
-
-if __name__ == "__main__":
-    import argparse
-    import pprint
-    
-    # 创建命令行参数解析器
-    parser = argparse.ArgumentParser(description='解析Megascan资产并生成本地资源清单')
-    parser.add_argument('folder_path', type=str, help='Megascan资产文件夹的路径')
-    parser.add_argument('--output', '-o', type=str, help='输出JSON文件的路径(可选)')
-    parser.add_argument('--pretty', '-p', action='store_true', help='是否美化输出')
-    
-    args = parser.parse_args()
-    
-    try:
-        # 创建资产对象
-        asset = create_local_asset(args.folder_path)
-        
-        # 获取本地信息
-        local_info = asset.export_local_info()
-        
-        # 输出信息
-        if args.output:
-            # 写入JSON文件
-            with open(args.output, 'w', encoding='utf-8') as f:
-                if args.pretty:
-                    json.dump(local_info, f, indent=2, ensure_ascii=False)
-                else:
-                    json.dump(local_info, f, ensure_ascii=False)
-            print(f"结果已保存到: {args.output}")
-        else:
-            # 打印到控制台
-            if args.pretty:
-                pprint.pprint(local_info)
-            else:
-                print(json.dumps(local_info, ensure_ascii=False))
-                
-        # 打印一些基本统计信息
-        print("\n资产统计信息:")
-        print(f"资产ID: {asset.asset_info.id}")
-        print(f"资产名称: {asset.asset_info.name}")
-        print(f"几何体LOD数量: {len(asset.get_available_lods())}")
-        print(f"可用纹理类型: {', '.join(asset.get_available_texture_types())}")
-        
-    except Exception as e:
-        print(f"错误: {str(e)}")
