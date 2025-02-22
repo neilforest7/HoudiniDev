@@ -1,9 +1,10 @@
 import os
 import json
 import re
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Union, Tuple
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import hou
 
 # 数据类定义
 @dataclass
@@ -76,6 +77,8 @@ class GeometryVariation:
     """几何体变体类"""
     var_id: str  # 变体ID，如 "Var1"
     lods: Dict[str, GeometryFile] = None  # LOD模型字典，包括High
+    is_packed: bool = False  # 新增：标识是否为打包变体
+    packed_index: Optional[int] = None  # 新增：如果是打包变体，存储其在文件中的索引
     
     def __post_init__(self):
         if self.lods is None:
@@ -84,7 +87,9 @@ class GeometryVariation:
     def to_dict(self):
         return {
             "var_id": self.var_id,
-            "lods": {k: v.to_dict() for k, v in self.lods.items()}
+            "lods": {k: v.to_dict() for k, v in self.lods.items()},
+            "is_packed": self.is_packed,
+            "packed_index": self.packed_index
         }
 
 class LocalMegascanAsset:
@@ -220,138 +225,251 @@ class LocalMegascanAsset:
         self.geometries = {}
         
         # 1. 首先检查是否有变体目录
-        var_dirs = [d for d in os.listdir(self.asset_folder) if d.startswith("Var") and os.path.isdir(self.asset_folder / d)]
+        var_dirs = [d for d in os.listdir(self.asset_folder) 
+                    if d.startswith("Var") and os.path.isdir(self.asset_folder / d)]
         print(f"找到的变体目录: {var_dirs}")
         
         if var_dirs:
-            # 有变体目录的情况
-            print(f"处理有变体目录的情况...")
+            # 有变体目录的情况，使用目录式变体处理
+            print(f"处理目录式变体...")
             var_dirs.sort()
             for var_dir in var_dirs:
                 self._parse_variation(var_dir)
+            
         else:
-            # 无变体目录的情况，创建默认变体
-            print(f"没有找到变体目录，使用默认变体Var1")
-            self._parse_variation("Var1", default_variation=True)
-
+            # 无变体目录的情况，检查是否是打包的变体
+            print(f"没有找到变体目录，检查是否存在打包变体...")
+            
+            # 按优先级查找主几何体文件
+            main_geo = self._find_main_geometry()
+            
+            if main_geo:
+                # 分析打包的变体
+                variations = self.analyze_packed_variations(str(self.asset_folder / main_geo))
+                
+                if variations["num_variations"] > 1:  # 只有当检测到多个变体时才使用打包变体
+                    print(f"找到打包的变体: {variations['num_variations']}个")
+                    # 使用_parse_variation处理每个变体
+                    for i, var_name in enumerate(variations["variation_names"]):
+                        var_id = f"Var{i+1}"
+                        # 创建临时变体信息供_parse_variation使用
+                        temp_var_info = {
+                            "is_packed": True,
+                            "packed_index": i,
+                            "main_geo": main_geo,
+                            "tris": variations["primitive_counts"].get(var_name)
+                        }
+                        self._parse_variation(var_id, default_variation=True, packed_var_info=temp_var_info)
+                else:
+                    # 只有一个变体或没有检测到变体，使用默认变体
+                    print(f"未检测到多个变体，使用默认变体Var1")
+                    self._parse_variation("Var1", default_variation=True)
+            else:
+                # 没有找到几何体文件，使用默认变体
+                print(f"没有找到几何体文件，使用默认变体Var1")
+                self._parse_variation("Var1", default_variation=True)
     
-    def _parse_variation(self, var_id: str, default_variation: bool = False):
-        """解析单个变体的几何体"""
-        print(f"\n开始解析变体: {var_id} (is_default={default_variation})")
+    def _find_main_geometry(self) -> Optional[str]:
+        """按优先级查找主几何体文件
+        
+        Returns:
+            str: 找到的文件路径，如果没找到则返回None
+        """
+        # 1. 查找high模型
+        for file in self.local_files:
+            if (file.endswith((".fbx", ".abc")) and 
+                "_LOD" not in file and 
+                "_high." in file.lower()):
+                return file
+        
+        # 2. 查找其他不带LOD的模型
+        for file in self.local_files:
+            if file.endswith((".fbx", ".abc")) and "LOD" not in file:
+                return file
+        
+        # 3. 查找LOD0模型
+        for file in self.local_files:
+            if file.endswith((".fbx", ".abc")) and "LOD0" in file:
+                return file
+        
+        return None
+    
+    def _parse_variation(self, var_id: str, default_variation: bool = False, packed_var_info: Dict = None):
+        """解析单个变体的几何体
+        
+        Args:
+            var_id: 变体ID
+            default_variation: 是否为默认变体
+            packed_var_info: 打包变体的额外信息，包含：
+                - is_packed: 是否为打包变体
+                - packed_index: 在文件中的索引
+                - main_geo: 主几何体文件
+                - tris: 面数
+        """
+        print(f"\n开始解析变体: {var_id} (is_default={default_variation}, is_packed={packed_var_info is not None})")
         var_geo = GeometryVariation(var_id=var_id)
         
-        # 确定基础路径和资产ID
-        base_path = f"{var_id}/" if not default_variation else ""
-        asset_id = self.json_data['id']
-        print(f"基础路径: {base_path}")
-        print(f"资产ID: {asset_id}")
-        
-        # 从JSON中获取几何体信息
-        if "models" in self.json_data:
-            print("\n使用models字段解析...")
-            for model in self.json_data["models"]:
-                print(f"\n处理model: {model}")
-                
-                # 获取文件路径
-                if "uri" not in model or not model["uri"]:
-                    print(f"没有uri字段或uri为空，跳过")
+        if packed_var_info:
+            # 处理打包变体
+            var_geo.is_packed = True
+            var_geo.packed_index = packed_var_info["packed_index"]
+            
+            # 创建几何体文件对象
+            main_geo = packed_var_info["main_geo"]
+            geo_file = GeometryFile(
+                fbx=main_geo if main_geo.endswith(".fbx") else None,
+                abc=main_geo if main_geo.endswith(".abc") else None,
+                tris=packed_var_info["tris"],
+                var_id=var_id,
+                lod_level="High"
+            )
+            var_geo.lods["High"] = geo_file
+            
+            base_name = main_geo.rsplit(".", 1)[0]
+            if "_high" in base_name.lower():
+                base_name = base_name.lower().replace("_high", "")
+            
+            # 查找对应的LOD文件
+            for file in self.local_files:
+                if not file.endswith((".fbx", ".abc")) or "_LOD" not in file:
                     continue
-                
-                # 规范化路径以进行比较
-                model_uri = model["uri"]
-                print(f"规范化后的文件路径: {model_uri}")
-                
-                # 检查文件是否存在且属于当前变体
-                if not model_uri.startswith(base_path) and not default_variation:
-                    print(f"文件不属于当前变体目录，跳过: {model_uri}")
+                    
+                # 确保是同一组文件
+                file_base = file.rsplit("_LOD", 1)[0]
+                if file_base.lower() != base_name.lower():
                     continue
-                
-                if model_uri not in self.local_files:
-                    print(f"文件不存在于本地文件列表中: {model_uri}")
-                    continue
-                
-                print(f"找到文件: {model_uri}")
-                
-                # 创建几何体文件
-                lod_geo = GeometryFile()
-                lod_geo.var_id = var_id  # 设置变体ID
-                
-                if model["mimeType"] == "application/x-fbx":
-                    lod_geo.fbx = model_uri
-                    print(f"设置为FBX文件")
-                elif model["mimeType"] == "application/x-abc":
-                    lod_geo.abc = model_uri
-                    print(f"设置为ABC文件")
-                lod_geo.tris = model.get("tris")
-                
-                # 确定LOD级别
-                if model["type"] == "original" or model["type"] == "high" or model["type"] == "High":
-                    lod_geo.lod_level = "High"  # 设置LOD级别
-                    var_geo.lods["High"] = lod_geo
-                    print(f"添加为High模型")
-                elif model["type"] == "lod":
-                    lod_level = str(model["lod"])
-                    lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
-                    var_geo.lods[f"LOD{lod_level}"] = lod_geo
-                    print(f"添加为LOD{lod_level}模型")
-                
-        elif "meshes" in self.json_data:
-            print("\n使用meshes字段解析...")
-            for mesh in self.json_data["meshes"]:
-                print(f"\n处理mesh: {mesh}")
-                
-                if mesh["type"] == "original":
-                    print("处理original类型mesh")
-                    for uri in mesh["uris"]:
-                        # 检查文件是否属于当前变体
-                        if not uri["uri"].startswith(base_path) and not default_variation:
-                            print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
-                            continue
-                            
-                        if uri["uri"] in self.local_files:
-                            print(f"找到文件: {uri['uri']}")
-                            lod_geo = GeometryFile()
-                            lod_geo.var_id = var_id  # 设置变体ID
-                            lod_geo.lod_level = "High"  # 设置LOD级别
-                            
-                            if uri["mimeType"] == "application/x-fbx":
-                                lod_geo.fbx = uri["uri"]
-                                print(f"设置为FBX文件")
-                            elif uri["mimeType"] == "application/x-abc":
-                                lod_geo.abc = uri["uri"]
-                                print(f"设置为ABC文件")
-                            lod_geo.tris = mesh.get("tris")
-                            var_geo.lods["High"] = lod_geo
-                            print(f"添加为High模型")
-                            break
-                elif mesh["type"] == "lod":
-                    print("处理lod类型mesh")
-                    for uri in mesh["uris"]:
-                        # 检查文件是否属于当前变体
-                        if not uri["uri"].startswith(base_path) and not default_variation:
-                            print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
-                            continue
-                            
-                        if uri["uri"] in self.local_files:
-                            print(f"找到文件: {uri['uri']}")
-                            lod_geo = GeometryFile()
-                            lod_geo.var_id = var_id  # 设置变体ID
-                            
-                            if uri["mimeType"] == "application/x-fbx":
-                                lod_geo.fbx = uri["uri"]
-                                print(f"设置为FBX文件")
-                            elif uri["mimeType"] == "application/x-abc":
-                                lod_geo.abc = uri["uri"]
-                                print(f"设置为ABC文件")
-                            lod_geo.tris = mesh.get("tris")
-                            
-                            # 从文件名提取LOD级别
-                            lod_match = uri["uri"].split("_LOD")
-                            if len(lod_match) > 1:
-                                lod_level = lod_match[-1].split(".")[0]
-                                lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
-                                var_geo.lods[f"LOD{lod_level}"] = lod_geo
-                                print(f"添加为LOD{lod_level}模型")
+                    
+                # 提取LOD级别
+                lod_match = file.split("_LOD")
+                if len(lod_match) > 1:
+                    lod_level = f"LOD{lod_match[-1].split('.')[0]}"
+                    
+                    # 创建几何体文件
+                    lod_geo = GeometryFile(
+                        fbx=file if file.endswith(".fbx") else None,
+                        abc=file if file.endswith(".abc") else None,
+                        var_id=var_geo.var_id,
+                        lod_level=lod_level
+                    )
+                    
+                    # 添加到变体
+                    var_geo.lods[lod_level] = lod_geo
+                    print(f"为变体 {var_geo.var_id} 添加 {lod_level} 模型: {file}")
+            
+        else:
+            # 原有的目录式变体处理逻辑
+            # 确定基础路径和资产ID
+            base_path = f"{var_id}/" if not default_variation else ""
+            asset_id = self.json_data['id']
+            print(f"基础路径: {base_path}")
+            print(f"资产ID: {asset_id}")
+            
+            # 从JSON中获取几何体信息
+            if "models" in self.json_data:
+                print("\n使用models字段解析...")
+                for model in self.json_data["models"]:
+                    print(f"\n处理model: {model}")
+                    
+                    # 获取文件路径
+                    if "uri" not in model or not model["uri"]:
+                        print(f"没有uri字段或uri为空，跳过")
+                        continue
+                    
+                    # 规范化路径以进行比较
+                    model_uri = model["uri"]
+                    print(f"规范化后的文件路径: {model_uri}")
+                    
+                    # 检查文件是否存在且属于当前变体
+                    if not model_uri.startswith(base_path) and not default_variation:
+                        print(f"文件不属于当前变体目录，跳过: {model_uri}")
+                        continue
+                    
+                    if model_uri not in self.local_files:
+                        print(f"文件不存在于本地文件列表中: {model_uri}")
+                        continue
+                    
+                    print(f"找到文件: {model_uri}")
+                    
+                    # 创建几何体文件
+                    lod_geo = GeometryFile()
+                    lod_geo.var_id = var_id  # 设置变体ID
+                    
+                    if model["mimeType"] == "application/x-fbx":
+                        lod_geo.fbx = model_uri
+                        print(f"设置为FBX文件")
+                    elif model["mimeType"] == "application/x-abc":
+                        lod_geo.abc = model_uri
+                        print(f"设置为ABC文件")
+                    lod_geo.tris = model.get("tris")
+                    
+                    # 确定LOD级别
+                    if model["type"] == "original" or model["type"] == "high" or model["type"] == "High":
+                        lod_geo.lod_level = "High"  # 设置LOD级别
+                        var_geo.lods["High"] = lod_geo
+                        print(f"添加为High模型")
+                    elif model["type"] == "lod":
+                        lod_level = str(model["lod"])
+                        lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
+                        var_geo.lods[f"LOD{lod_level}"] = lod_geo
+                        print(f"添加为LOD{lod_level}模型")
+            
+            elif "meshes" in self.json_data:
+                print("\n使用meshes字段解析...")
+                for mesh in self.json_data["meshes"]:
+                    print(f"\n处理mesh: {mesh}")
+                    
+                    if mesh["type"] == "original":
+                        print("处理original类型mesh")
+                        for uri in mesh["uris"]:
+                            # 检查文件是否属于当前变体
+                            if not uri["uri"].startswith(base_path) and not default_variation:
+                                print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
+                                continue
+                                
+                            if uri["uri"] in self.local_files:
+                                print(f"找到文件: {uri['uri']}")
+                                lod_geo = GeometryFile()
+                                lod_geo.var_id = var_id  # 设置变体ID
+                                lod_geo.lod_level = "High"  # 设置LOD级别
+                                
+                                if uri["mimeType"] == "application/x-fbx":
+                                    lod_geo.fbx = uri["uri"]
+                                    print(f"设置为FBX文件")
+                                elif uri["mimeType"] == "application/x-abc":
+                                    lod_geo.abc = uri["uri"]
+                                    print(f"设置为ABC文件")
+                                lod_geo.tris = mesh.get("tris")
+                                var_geo.lods["High"] = lod_geo
+                                print(f"添加为High模型")
+                                break
+                    elif mesh["type"] == "lod":
+                        print("处理lod类型mesh")
+                        for uri in mesh["uris"]:
+                            # 检查文件是否属于当前变体
+                            if not uri["uri"].startswith(base_path) and not default_variation:
+                                print(f"文件不属于当前变体目录，跳过: {uri['uri']}")
+                                continue
+                                
+                            if uri["uri"] in self.local_files:
+                                print(f"找到文件: {uri['uri']}")
+                                lod_geo = GeometryFile()
+                                lod_geo.var_id = var_id  # 设置变体ID
+                                
+                                if uri["mimeType"] == "application/x-fbx":
+                                    lod_geo.fbx = uri["uri"]
+                                    print(f"设置为FBX文件")
+                                elif uri["mimeType"] == "application/x-abc":
+                                    lod_geo.abc = uri["uri"]
+                                    print(f"设置为ABC文件")
+                                lod_geo.tris = mesh.get("tris")
+                                
+                                # 从文件名提取LOD级别
+                                lod_match = uri["uri"].split("_LOD")
+                                if len(lod_match) > 1:
+                                    lod_level = lod_match[-1].split(".")[0]
+                                    lod_geo.lod_level = f"LOD{lod_level}"  # 设置LOD级别
+                                    var_geo.lods[f"LOD{lod_level}"] = lod_geo
+                                    print(f"添加为LOD{lod_level}模型")
         
         # 只有当变体包含几何体时才添加
         if var_geo.lods:
@@ -359,6 +477,70 @@ class LocalMegascanAsset:
             self.geometries[var_id] = var_geo
         else:
             print(f"\n变体 {var_id} 没有找到任何几何体，跳过")
+    
+    def analyze_packed_variations(self, geo_file: str) -> Dict[str, Any]:
+        """分析打包在一个文件中的变体信息
+        
+        Args:
+            geo_file: 几何体文件路径
+            
+        Returns:
+            Dict包含:
+            - num_variations: 变体数量
+            - variation_names: 变体名称列表（如果可用）
+            - primitive_counts: 每个变体的面数
+        """
+        result = {
+            "num_variations": 0,
+            "variation_names": [],
+            "primitive_counts": {}
+        }
+        
+        # 获取文件格式
+        file_format = geo_file.split(".")[-1].lower()
+        
+        try:
+            # 创建临时节点进行分析
+            temp_obj = hou.node("/obj").createNode("geo", "temp_analysis")
+            file_node = temp_obj.createNode("file")
+            file_node.parm("file").set(geo_file)
+            
+            if file_format == "abc":
+                # ABC文件直接读取
+                geo = file_node.geometry()
+                prims = geo.prims()
+                result["num_variations"] = len(prims)
+                
+                # 尝试获取primitive名称作为变体名
+                for i, prim in enumerate(prims):
+                    name = prim.attribValue("name") if prim.attribValue("name") else f"Var{i+1}"
+                    result["variation_names"].append(name)
+                    result["primitive_counts"][name] = prim.intrinsicValue("vertexcount")
+                    
+            else:
+                # FBX/OBJ等需要pack处理
+                pack = file_node.createOutputNode("pack")
+                pack.parm("packbyname").set(1)
+                
+                geo = pack.geometry()
+                prims = geo.prims()
+                result["num_variations"] = len(prims)
+                
+                # 获取packed primitive的信息
+                for i, prim in enumerate(prims):
+                    name = prim.attribValue("name") if prim.attribValue("name") else f"Var{i+1}"
+                    result["variation_names"].append(name)
+                    result["primitive_counts"][name] = prim.intrinsicValue("packedtris")
+                    
+        except Exception as e:
+            print(f"分析几何体变体时出错: {str(e)}")
+            
+        finally:
+            # 清理临时节点
+            if "temp_obj" in locals():
+                temp_obj.destroy()
+                
+        return result
     
     def _parse_textures(self):
         """解析纹理文件"""

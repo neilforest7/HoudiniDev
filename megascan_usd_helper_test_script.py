@@ -2,7 +2,7 @@ from megascan_usd_helper_v01 import create_local_asset
 import json
 
 # 创建资产对象
-asset_path = r"A:/AppBase/QuixelBridge/Downloaded/3dplant/houseplant_flowering_vgztealha"
+asset_path = r"A:/AppBase/QuixelBridge/Downloaded/3d/3d_metal_tffsecjda/tffsecjda.json"
 asset = create_local_asset(asset_path)
 
 # 获取并打印信息
