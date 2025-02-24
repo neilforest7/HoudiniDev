@@ -1111,18 +1111,27 @@ def buildGeo(node, asset_manager: LocalMegascanAsset, hasProxy: bool):
     
     # 创建变体控制节点
     addvariant = megascansSubnet.createNode("addvariant")
-    addvariant.parm("primpath").set("/`chs(\"../name\")`")
+    addvariant.parm("primpath").set(r'/`chs("../name")`')
+    addvariant.parm("variantprimpath").set(r'/`chs("../name")`/lod')
     addvariant.parm("variantset").set("geo")
+    addvariant.parm("primkind").set("component")
     
     configurePrim = addvariant.createOutputNode("configureprimitive")
     configurePrim.parm("setkind").set(1)
     configurePrim.parm("kind").set("component")
     
     setvariant = configurePrim.createOutputNode("setvariant")
-    setvariant.parm("primpattern1").set("`chs(\"../name\")`")
+    setvariant.parm("num_variants").set(2)
+    # set variant 0
+    setvariant.parm("primpattern1").set(r'/`chs("../name")`')
     setvariant.parm("variantset1").set("geo")
-    setvariant.parm("variantname1").set("VAR_1")
-    
+    setvariant.parm("variantname1").set("VAR_0")
+    # set lod 0
+    setvariant.parm("primpattern2").set(r'/`chs("../name")`')
+    setvariant.parm("variantset2").set("lod")
+    setvariant.parm("variantnameuseindex2").set(1)
+    setvariant.parm("variantnameindex2").set(0)
+
     output  = setvariant.createOutputNode("output")
     output.setDisplayFlag(True)
     # 处理每个变体
@@ -1138,17 +1147,14 @@ def createGeoVar(asset_manager, hasProxy, megascansSubnet, addvariant):
     for var_index, (var_id, var_data) in enumerate(asset_manager.geometries.items()):
         print(f"\n处理变体 {var_id}:")
         print(f"变体数据: {var_data.to_dict()}")
-        print(f"LODs: {var_data.lods}")
+        print(f"\nLODs: {var_data.lods}")
+
+        addLod = megascansSubnet.createNode("addvariant","addLodVariant_"+str(var_index))
+        addLod.parm("primpath").set(r'/`chs("../name")`/lod')
+        addLod.parm("variantset").set("lod")
         
-        # 创建几何体节点
-        geoVar = megascansSubnet.createNode("sopcreate", f"geo_var_{var_index}")
-        geoVarCreate = geoVar.node("sopnet").node("create")
-        if not geoVarCreate:
-            print(f"错误：无法在 {geoVar.path()} 中找到geoVarCreate节点")
-            continue
-            
         nullGeo = megascansSubnet.createNode("null","IN_GEO_"+str(var_index))
-        nullGeo.setInput(0,geoVar)
+        nullGeo.setInput(0,addLod)
         
         #Create proxy var
         proxyVar = megascansSubnet.createNode("sopcreate","proxy_var_"+str(var_index))
@@ -1158,110 +1164,121 @@ def createGeoVar(asset_manager, hasProxy, megascansSubnet, addvariant):
         nullProxy.setInput(0,proxyVar)
         
         #Create switch proxy
-        switchProxy = megascansSubnet.createNode("switch","switch_hasProxy")
+        switchProxy = megascansSubnet.createNode("switch","switch_hasProxy"+str(var_index))
         switchProxy.parm("input").setExpression("ch(\"../../hasProxy\")")
-        nullEmpty = megascansSubnet.createNode("null","EMPTY")
+        nullEmpty = megascansSubnet.createNode("null","EMPTY"+str(var_index))
         switchProxy.setInput(0,nullEmpty)
         switchProxy.setInput(1,nullProxy)
         
-        merge = megascansSubnet.createNode("merge")
+        merge = megascansSubnet.createNode("merge","merge_"+str(var_index))
         merge.setInput(0,nullGeo)
         merge.setInput(1,switchProxy)
         
-        nullVar = megascansSubnet.createNode("null","VAR_"+str(var_index+1))
+        nullVar = megascansSubnet.createNode("null","VAR_"+str(var_index))
         nullVar.setInput(0,merge)
         
         # 连接到addvariant
         addvariant.setInput(var_index+1, nullVar)
         
-        # 获取主要几何体
-        print(f"查找High LOD或LOD0几何体...")
-        main_geo = var_data.lods.get("High")
-        if not main_geo:
-            print(f"未找到High LOD，尝试使用LOD0...")
-            main_geo = var_data.lods.get("LOD0")
-            if not main_geo:
-                print(f"错误：在变体 {var_id} 中既没有High LOD也没有LOD0")
-                print(f"可用的LOD级别: {list(var_data.lods.keys())}")
+        for lod_index, (lod_name, lod_item) in enumerate(var_data.lods.items()):
+            # 创建几何体节点
+            print(f"处理LOD{lod_name}...")
+            geoVar = megascansSubnet.createNode("sopcreate", f"geo_var_{var_index}_{lod_name}")
+            geoVarCreate = geoVar.node("sopnet").node("create")
+            if not geoVarCreate:
+                print(f"错误：无法在 {geoVar.path()} 中找到geoVarCreate节点")
                 continue
-            print(f"使用LOD0作为主要几何体")
             
-        geo_path = main_geo.fbx # if asset_manager.is_3d_plant else main_geo.abc
-        if not geo_path:
-            print(f"错误：无法在 {geoVar.path()} 中找到geo_path")
-            continue
-            
-        # 创建几何体节点
-        file = geoVarCreate.createNode("file")
-        file.parm("file").set(str(asset_manager.asset_folder / geo_path))
-        if not file:
-            print(f"错误：无法在 {geoVar.path()} 中创建file节点")
-            continue
-        
-
-        # 如果是打包变体，添加blast节点
-        if var_data.is_packed:
-            if not asset_manager.is_3d_plant:
-                pack = file.createOutputNode("pack")
-                pack.parm("packbyname").set(1)
-                blast = pack.createOutputNode("blast")
-            else:
-                blast = file.createOutputNode("blast")
+            # 获取主要几何体
+            print(f"查找LOD为{lod_name}的几何体...")
+            main_geo = lod_item
+            if not main_geo:
+                print(f"未找到LOD为{lod_name}的模型")
+            #     main_geo = var_data.lods.get("LOD0")
+            #     if not main_geo:
+            #         print(f"错误：在变体 {var_id} 中既没有High LOD也没有LOD0")
+            #         print(f"可用的LOD级别: {list(var_data.lods.keys())}")
+            #         continue
+            #     print(f"使用LOD0作为主要几何体")
                 
-            blast.parm("group").set(str(var_data.packed_index))
-            blast.parm("negate").set(1)
-            last_node = blast
-        else:
-            last_node = file
+            geo_path = main_geo.fbx # if asset_manager.is_3d_plant else main_geo.abc
+            if not geo_path:
+                print(f"错误：无法在 {geoVar.path()} 中找到geo_path")
+                continue
+                
+            # 创建几何体节点
+            file = geoVarCreate.createNode("file")
+            file.parm("file").set(str(asset_manager.asset_folder / geo_path))
+            if not file:
+                print(f"错误：无法在 {geoVar.path()} 中创建file节点")
+                continue
+
+            # 如果是打包变体，添加blast节点
+            if var_data.is_packed:
+                if not asset_manager.is_3d_plant:
+                    pack = file.createOutputNode("pack")
+                    pack.parm("packbyname").set(1)
+                    blast = pack.createOutputNode("blast")
+                else:
+                    blast = file.createOutputNode("blast")
+                    
+                blast.parm("group").set(str(var_data.packed_index))
+                blast.parm("negate").set(1)
+                last_node = blast
+            else:
+                last_node = file
+                
+            # 添加transform节点
+            transform = last_node.createOutputNode("xform")
+            transform.parm("scale").set(0.01)
             
-        # 添加transform节点
-        transform = last_node.createOutputNode("xform")
-        transform.parm("scale").set(0.01)
-        
-        convert = transform.createOutputNode("convert")
-        
-        # 处理normalize
-        matchsize = convert.createOutputNode("matchsize")
-        if asset_manager.asset_type == "3DPlant":
-            matchsize.parm("justify_y").set(1)
-        matchsize.parm("sizex").set(2)
-        matchsize.parm("sizey").set(2)
-        matchsize.parm("sizez").set(2)
-        matchsize.parm("doscale").set(1)
-        
-        # 创建normalize开关
-        switchNormalize = geoVarCreate.createNode("switch", "switch_isNormalize")
-        switchNormalize.setInput(0, convert)
-        switchNormalize.setInput(1, matchsize)
-        switchNormalize.parm("input").setExpression("ch(\"../../../../../normalize\")")
-        
-        # 设置路径
-        wranglePath = geoVarCreate.createNode("attribwrangle", "setPath")
-        if hasProxy:
-            snippet_path = "s@path=chs(\"../../../../../proxyPrimPath\");"
-        else:
-            snippet_path = "s@path=chs(\"../../../../../geoPrimPath\");"
-        wranglePath.parm("snippet").set(snippet_path)
-        wranglePath.parm("class").set(1)
-        wranglePath.setInput(0, switchNormalize)
-        
-        # 清理属性
-        attribdelete = geoVarCreate.createNode("attribdelete")
-        attribdelete.parm("negate").set(1)
-        attribdelete.parm("ptdel").set("N P uv Cd")
-        attribdelete.parm("vtxdel").set("uv N Cd")
-        attribdelete.parm("primdel").set("path")
-        attribdelete.setInput(0, wranglePath)
-        
-        groupdelete = geoVarCreate.createNode("groupdelete")
-        groupdelete.parm("group1").set("*")
-        groupdelete.setInput(0, attribdelete)
-        
-        outNull = groupdelete.createOutputNode("null", "OUT")
-        outNull.setDisplayFlag(True)
-        outNull.setRenderFlag(True)
-        
-        geoVarCreate.layoutChildren()
+            convert = transform.createOutputNode("convert")
+            
+            # 处理normalize
+            matchsize = convert.createOutputNode("matchsize")
+            if asset_manager.asset_type == "3DPlant":
+                matchsize.parm("justify_y").set(1)
+            matchsize.parm("sizex").set(2)
+            matchsize.parm("sizey").set(2)
+            matchsize.parm("sizez").set(2)
+            matchsize.parm("doscale").set(1)
+            
+            # 创建normalize开关
+            switchNormalize = geoVarCreate.createNode("switch", "switch_isNormalize")
+            switchNormalize.setInput(0, convert)
+            switchNormalize.setInput(1, matchsize)
+            switchNormalize.parm("input").setExpression("ch(\"../../../../../normalize\")")
+            
+            # 设置路径
+            wranglePath = geoVarCreate.createNode("attribwrangle", "setPath")
+            if hasProxy:
+                snippet_path = "s@path=chs(\"../../../../../proxyPrimPath\");"
+            else:
+                snippet_path = "s@path=chs(\"../../../../../geoPrimPath\");"
+            wranglePath.parm("snippet").set(snippet_path)
+            wranglePath.parm("class").set(1)
+            wranglePath.setInput(0, switchNormalize)
+            
+            # 清理属性
+            attribdelete = geoVarCreate.createNode("attribdelete")
+            attribdelete.parm("negate").set(1)
+            attribdelete.parm("ptdel").set("N P uv Cd")
+            attribdelete.parm("vtxdel").set("uv N Cd")
+            attribdelete.parm("primdel").set("path")
+            attribdelete.setInput(0, wranglePath)
+            
+            groupdelete = geoVarCreate.createNode("groupdelete")
+            groupdelete.parm("group1").set("*")
+            groupdelete.setInput(0, attribdelete)
+            
+            outNull = groupdelete.createOutputNode("null", "OUT")
+            outNull.setDisplayFlag(True)
+            outNull.setRenderFlag(True)
+            
+            geoVarCreate.layoutChildren()
+            
+            # 连接到addLod
+            addLod.setInput(lod_index+1,geoVar)
 ## END CREATE GEO FUNCTIONS ##
 
 ########  ##     ## #### ##       ########     ##     ##    ###    ########
@@ -1293,20 +1310,20 @@ def buildMaterial(node, asset_manager: LocalMegascanAsset, assetDir, res, textFo
     texturesDict = getTexturesDict(asset_manager, texturetypeNames, texturesDir, res, textFormat)
     
     # 获取assign material节点
-    assignmaterial = node.node("material_assign").node("assignmaterial1")
+    assignmaterial = node.node("material_assign") #.node("assignmaterial1")
     
     # 分配材质
     assignmaterial.parm("nummaterials").set(1)
-    assignmaterial.parm("primpattern1").set("/`chs(\"../../CONTROL/name\")`"+"`chs(\"../../geoPrimPath\")`")
-    assignmaterial.parm("matspecpath1").set("/`chs(\"../../CONTROL/name\")`/materials/mtlxmaterial_VAR_1")
+    assignmaterial.parm("primpattern1").set("/`chs(\"../CONTROL/name\")`"+"`chs(\"../geoPrimPath\")`")
+    assignmaterial.parm("matspecpath1").set("/`chs(\"../CONTROL/name\")`/mat/mtlxmaterial_VAR_1")
     
     if hasProxy:
         assignmaterial.parm("nummaterials").set(2)
-        assignmaterial.parm("primpattern2").set("/`chs(\"../../CONTROL/name\")`"+"`chs(\"../../proxyPrimPath\")`")
-        assignmaterial.parm("matspecpath2").set("/`chs(\"../../CONTROL/name\")`/materials/mtlxmaterial_VAR_1")
+        assignmaterial.parm("primpattern2").set("/`chs(\"../CONTROL/name\")`"+"`chs(\"../proxyPrimPath\")`")
+        assignmaterial.parm("matspecpath2").set("/`chs(\"../CONTROL/name\")`/mat/mtlxmaterial_VAR_1")
     
     # 应用纹理
-    applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesDict, texturesDir, plug_all_maps)
+    applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesDict, texturesDir, plug_all_maps, asset_manager)
     
     # 更新映射信息
     mapping_info = format_mapping_info(asset_manager, texturesDict)
@@ -1529,11 +1546,18 @@ def getMinMaxPixelValue(path):
     return min, max
     
 #Apply textures function
-def applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesDict, texturesDir, plug_all_maps: bool):
+def applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesDict, texturesDir, plug_all_maps: bool, asset_manager):
     """应用纹理到MaterialX节点"""
     print("\n开始应用纹理...")
     print(f"纹理字典内容: {texturesDict}")
     print(f"纹理目录: {texturesDir}")
+
+    # 添加颜色空间映射字典
+    colorspace_mapping = {
+        "srgb": "srgb_texture",
+        "linear": "Raw",
+        "acescg": "ACEScg"
+    }
 
     print("\n创建基础节点...")
     mtlxmultiply = mtlx_subnet.createNode("mtlxmultiply")
@@ -1555,6 +1579,25 @@ def applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesD
             path = texturesDir+"/"+texturesDict[td]
             print(f"设置纹理路径: {path}")
             image.parm("file").set(path)
+            
+            # 获取纹理的颜色空间信息并设置
+            texture_file = None
+            for tex_type, resolutions in asset_manager.textures.items():
+                if tex_type.lower() == td:
+                    for res_data in resolutions.values():
+                        for tex_file in res_data.files:
+                            if os.path.basename(tex_file.path) == texturesDict[td]:
+                                texture_file = tex_file
+                                break
+                        if texture_file:
+                            break
+                    break
+            
+            if texture_file:
+                source_colorspace = texture_file.color_space.lower()
+                mtlx_colorspace = colorspace_mapping.get(source_colorspace, "raw")
+                print(f"设置颜色空间: {source_colorspace} -> {mtlx_colorspace}")
+                image.parm("filecolorspace").set(mtlx_colorspace)
             
             if td == "albedo":
                 print("处理albedo纹理:")
@@ -1619,8 +1662,8 @@ def applyTextures(mtlx_subnet, mtlxstandard_surface, mtlxdisplacement, texturesD
                 
                 mtlxdisplacement.setInput(0, mtlxrange)
                 print("- 连接到mtlxdisplacement节点")
-                mtlxdisplacement.parm("scale").set(0.01)
-                print("- 设置displacement scale为0.01")
+                mtlxdisplacement.parm("scale").set(0.0001)
+                print("- 设置displacement scale为0.0001")
                 image.parm("signature").set("float")
                 print("- 设置signature为float")
                 
@@ -1689,7 +1732,7 @@ class MainDialog(wdg.QDialog):
         
         # 设置窗口
         self.setWindowTitle("Megascans Asset Builder")
-        self.setFixedSize(core.QSize(700,325))
+        self.setFixedSize(core.QSize(600,225))
         
         # 创建UI
         self._create_ui(available_resolutions, available_texture_formats)
@@ -1702,7 +1745,7 @@ class MainDialog(wdg.QDialog):
         
         # 如果没有(这种情况不应该发生，因为_load_asset时已经调用了_update_asset_info)
         # 作为后备方案，返回空列表
-        print("警告：asset_info中没有找到纹理分辨率信息")
+        print("Warning: No texture resolution info found in asset_info")
         return []
     
     def _get_available_texture_formats(self) -> List[str]:
@@ -1726,32 +1769,32 @@ class MainDialog(wdg.QDialog):
         # Create Texture Res Combo Box        
         self.textRes_combo_box = wdg.QComboBox()
         self.textRes_combo_box.addItems(available_resolutions)
-        self.textRes_combo_box.setFixedSize(250,30)
-        formLay.addRow(self.tr("&纹理分辨率: "), self.textRes_combo_box)
+        # self.textRes_combo_box.setFixedSize(250,30)
+        formLay.addRow(self.tr("&Texture Resolution: "), self.textRes_combo_box)
         
         # Create Texture Format Combo Box
         self.textFormat_combo_box = wdg.QComboBox()
         self.textFormat_combo_box.addItems(available_texture_formats)
-        self.textFormat_combo_box.setFixedSize(250,30)
-        formLay.addRow(self.tr("&纹理格式: "), self.textFormat_combo_box)
+        # self.textFormat_combo_box.setFixedSize(250,30)
+        formLay.addRow(self.tr("&Texture Format: "), self.textFormat_combo_box)
         
         # Create buttons layout
         buttonsLay = wdg.QHBoxLayout()
         mainLay.addLayout(buttonsLay)
         
-        buildAllButton = wdg.QPushButton("构建全部")
+        buildAllButton = wdg.QPushButton("Build All")
         buildAllButton.clicked.connect(self.viewBuildAll)
         buttonsLay.addWidget(buildAllButton)
         
-        buildGeoButton = wdg.QPushButton("构建几何体")
+        buildGeoButton = wdg.QPushButton("Build Geo")
         buildGeoButton.clicked.connect(self.viewBuildGeo)
         buttonsLay.addWidget(buildGeoButton)
         
-        buildMaterialButton = wdg.QPushButton("构建材质")
+        buildMaterialButton = wdg.QPushButton("Build Material")
         buildMaterialButton.clicked.connect(self.viewBuildMaterial)
         buttonsLay.addWidget(buildMaterialButton)
         
-        cancelButton = wdg.QPushButton("取消")
+        cancelButton = wdg.QPushButton("Cancel")
         cancelButton.clicked.connect(self.reject)
         buttonsLay.addWidget(cancelButton)
         
@@ -1799,8 +1842,9 @@ class MainDialog(wdg.QDialog):
             print(f"更新映射信息标签失败: {str(e)}")
         
         self.accept()
-        message = "Megascan资产构建成功。"
+        message = "Megascan Asset Build Success."
         hou.ui.displayMessage(message)
+        node.setColor(hou.Color(0.12,0.80,0.18))
 
     def viewBuildGeo(self):
         # 使用asset_manager的属性
@@ -1811,9 +1855,9 @@ class MainDialog(wdg.QDialog):
         # 调用buildGeo时不再传递lod和format参数
         buildGeo(node, asset_manager, hasProxy)
         self.accept()
-        message = "Megascan几何体构建成功。"
+        message = "Megascan Geo Build Success."
         hou.ui.displayMessage(message)
-        
+        node.setColor(hou.Color(0.12,0.80,0.18))
         
     def viewBuildMaterial(self):
         res = self.textRes_combo_box.currentText()
@@ -1826,9 +1870,9 @@ class MainDialog(wdg.QDialog):
         
         buildMaterial(node, asset_manager, assetDir, res, textFormat, hasProxy, plug_all_maps)
         self.accept()
-        message = "Megascan材质构建成功。"
+        message = "Megascan Material Build Success."
         hou.ui.displayMessage(message)
-
+        node.setColor(hou.Color(0.12,0.80,0.18))
 
 #Main button function, check errors and create dialog
 def createBuildDialog():
@@ -1864,6 +1908,7 @@ def clear():
     mat_library = node.node("materiallibrary1")
     mat_assign = node.node("material_assign")
     mapping_label = node.parm("mapping_info_label")
+    # variantblock_end =   mat_assign.node("variantblock_end1")
     
     if mapping_label:
         mapping_label.set("")
@@ -1875,23 +1920,24 @@ def clear():
     mat_childs = mat_library.children()
     for n in mat_childs:
         n.destroy()
-        
-    assignmaterial = mat_assign.node("assignmaterial1")
-    assignmaterial.parm("nummaterials").set(0)
-    mat_assign_childs = mat_assign.children()
     
-    variantblock_end =   mat_assign.node("variantblock_end1")
-    inputs = variantblock_end.inputs()
+    # assignmaterial = mat_assign.node("assignmaterial1")
+    mat_assign.parm("nummaterials").set(0)
+    # mat_assign_childs = mat_assign.children()
     
-    while len(inputs) > 2:
-        variantblock_end.setInput(2,None)
-        inputs = variantblock_end.inputs()
+    # print(f"try to clear variantblock_end: {variantblock_end}")
+    # inputs = variantblock_end.inputs()
     
-    nodeList = ["variantblock_begin1","assignmaterial1","VAR_1","variantblock_end1","setvariant1","output0"]
-    for n in mat_assign_childs:
-        if n.name() not in nodeList:
-            n.destroy()
-            
+    # while len(inputs) > 2:
+    #     variantblock_end.setInput(2,None)
+    #     inputs = variantblock_end.inputs()
+    
+    # nodeList = ["variantblock_begin1","assignmaterial1","VAR_1","variantblock_end1","setvariant1","output0"]
+    # for n in mat_assign_childs:
+    #     if n.name() not in nodeList:
+    #         n.destroy()
+    node.parm("name").set("assetName")
+    node.setColor(hou.Color(0.7,0.7,0.7))
     message = "Megascans Asset was successfully cleared."
     hou.ui.displayMessage(message)
     
