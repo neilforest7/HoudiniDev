@@ -1840,6 +1840,47 @@ class MainDialog(wdg.QDialog):
                     node.parm("name").set(f"{dir.split('_')[-1]}")
         except Exception as e:
             print(f"更新映射信息标签失败: {str(e)}")
+            
+        # 添加预览图像到network editor
+        try:
+            # 获取预览图路径
+            preview_path = None
+            if asset_manager.asset_info and asset_manager.asset_info.preview_image:
+                preview_path = str(asset_manager.asset_folder / asset_manager.asset_info.preview_image)
+                if os.path.exists(preview_path):
+                    # 获取显示当前节点的所有network editor
+                    editor = hou.ui.paneTabOfType(hou.paneTabType.NetworkEditor)
+                    # 创建网络图像
+                    image = hou.NetworkImage()
+                    image.setPath(preview_path)
+                    image.setRelativeToPath(node.path())
+                    
+                    # 设置图像位置
+                    image_size = hou.Vector2(3,3)
+                    image.setRect(hou.BoundingRect(hou.Vector2(0,0), image_size))
+                    
+                    # 获取现有的背景图像
+                    existing_images = list(editor.backgroundImages())
+                    print(f"\nexitsting_images: {existing_images}")
+                    # existing_images = []
+                    
+                    # 添加新图像
+                    existing_images.append(image)
+                    print(f"exitsting_images now: {existing_images}")
+
+                    # 更新背景图像
+                    import nodegraphutils as utils
+                    editor.setBackgroundImages(existing_images)
+                    utils.saveBackgroundImages(editor.pwd(), existing_images)
+                    print(f"editor backgroudimages: {editor.backgroundImages()}")
+                    
+                    print(f"成功添加预览图像到editor {editor.name()}: {preview_path}")
+                else:
+                    print(f"预览图文件不存在: {preview_path}")
+            else:
+                print("未找到预览图信息")
+        except Exception as e:
+            print(f"添加预览图像时出错: {str(e)}")
         
         self.accept()
         message = "Megascan Asset Build Success."
@@ -1908,7 +1949,20 @@ def clear():
     mat_library = node.node("materiallibrary1")
     mat_assign = node.node("material_assign")
     mapping_label = node.parm("mapping_info_label")
-    # variantblock_end =   mat_assign.node("variantblock_end1")
+    
+    # 删除与当前节点相关的NetworkImage
+    try:
+        editor = hou.ui.paneTabOfType(hou.paneTabType.NetworkEditor)
+        if editor:
+            # 获取所有背景图像
+            existing_images = list(editor.backgroundImages())
+            # 过滤出不属于当前节点的图像
+            filtered_images = [img for img in existing_images if img.relativeToPath() != node.path()]
+            # 更新背景图像
+            editor.setBackgroundImages(filtered_images)
+            print(f"成功删除节点 {node.path()} 相关的预览图像")
+    except Exception as e:
+        print(f"删除预览图像时出错: {str(e)}")
     
     if mapping_label:
         mapping_label.set("")
@@ -1921,26 +1975,13 @@ def clear():
     for n in mat_childs:
         n.destroy()
     
-    # assignmaterial = mat_assign.node("assignmaterial1")
     mat_assign.parm("nummaterials").set(0)
-    # mat_assign_childs = mat_assign.children()
     
-    # print(f"try to clear variantblock_end: {variantblock_end}")
-    # inputs = variantblock_end.inputs()
-    
-    # while len(inputs) > 2:
-    #     variantblock_end.setInput(2,None)
-    #     inputs = variantblock_end.inputs()
-    
-    # nodeList = ["variantblock_begin1","assignmaterial1","VAR_1","variantblock_end1","setvariant1","output0"]
-    # for n in mat_assign_childs:
-    #     if n.name() not in nodeList:
-    #         n.destroy()
     node.parm("name").set("assetName")
     node.setColor(hou.Color(0.7,0.7,0.7))
     message = "Megascans Asset was successfully cleared."
     hou.ui.displayMessage(message)
-    
+
 def format_mapping_info(asset_manager: LocalMegascanAsset, texturesDict: dict) -> str:
     """生成格式化的映射信息
     
